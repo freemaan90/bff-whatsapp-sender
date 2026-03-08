@@ -1,7 +1,6 @@
 // whatsapp.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import * as puppeteer from 'puppeteer';
-import * as qrcode from 'qrcode';
 
 @Injectable()
 export class WhatsappService {
@@ -12,86 +11,127 @@ export class WhatsappService {
   private isReady = false;
 
   async init() {
-    if (this.browser) return;
+    // 1. Intentar headless
+    const headlessSuccess = await this.tryInit(true);
 
-this.browser = await puppeteer.launch({
-  headless: false, // ← probá así primero
-  args: ['--no-sandbox'],
-  userDataDir: './whatsapp-session',
-});
+    if (headlessSuccess) {
+      this.logger.log('WhatsApp iniciado en headless');
+      return;
+    }
 
-    this.page = await this.browser.newPage();
+    this.logger.warn('Headless falló, intentando con headless: false...');
 
-    await this.page.goto('https://web.whatsapp.com', {
-      waitUntil: 'networkidle2',
-    });
+    // 2. Fallback: modo visible
+    const visibleSuccess = await this.tryInit(false);
 
-    this.logger.log('WhatsApp Web cargado');
+    if (visibleSuccess) {
+      this.logger.log('WhatsApp iniciado en modo visible');
+      return;
+    }
 
-    this.detectLoginState();
+    throw new Error('No se pudo inicializar WhatsApp Web en ningún modo');
   }
 
-private async detectLoginState() {
-  this.logger.log('Detectando QR una sola vez...');
+  private async tryInit(headless: boolean): Promise<boolean> {
+    try {
+      this.browser = await puppeteer.launch({
+        headless: headless ? true : false,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-software-rasterizer',
+          '--enable-webgl',
+          '--use-gl=swiftshader',
+          '--window-size=1280,800',
+        ],
+        defaultViewport: { width: 1280, height: 800 },
+        userDataDir: './whatsapp-session',
+      });
 
-  // Intentamos encontrar el QR durante 10 segundos
-  const maxAttempts = 10;
-  let attempts = 0;
+      this.page = await this.browser.newPage();
 
-  const interval = setInterval(async () => {
-    attempts++;
+      await this.page.setUserAgent(
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+      );
 
-    // 1. Buscar canvas del QR (incluyendo Shadow DOM)
+      await this.page.goto('https://web.whatsapp.com', {
+        waitUntil: 'networkidle2',
+      });
+
+      // Esperar un poco para que renderice el QR
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      // Intentar capturar QR una sola vez
+      const qr = await this.captureQR();
+
+      if (!qr) {
+        this.logger.warn(`No se pudo capturar QR en headless=${headless}`);
+        await this.browser.close();
+        return false;
+      }
+
+      this.qrBase64 = qr;
+      this.isReady = true;
+      return true;
+    } catch (err) {
+      this.logger.error(`Error inicializando headless=${headless}`, err);
+      return false;
+    }
+  }
+
+  private async captureQR(): Promise<string | null> {
+    // Intentar canvas en Shadow DOM
     const canvasHandle = await this.findCanvas(this.page);
 
     if (canvasHandle) {
       try {
         const qr = await canvasHandle.evaluate((node: HTMLCanvasElement) =>
-          node.toDataURL()
+          node.toDataURL(),
         );
-
-        this.qrBase64 = qr;
         this.logger.log('QR capturado desde canvas');
-      } catch (e) {
-        this.logger.error('Error leyendo QR del canvas', e);
+        return qr;
+      } catch {}
+    }
+
+    // Fallback: screenshot
+    try {
+      const qrArea = await this.page.$('canvas, img, svg');
+      if (qrArea) {
+        const buffer = await qrArea.screenshot();
+        const base64 = `data:image/png;base64,${(buffer as Buffer).toString('base64')}`;
+        this.logger.log('QR capturado por screenshot fallback');
+        return base64;
       }
+    } catch {}
 
-      clearInterval(interval);
-      return;
-    }
+    return null;
+  }
 
-    // 2. Si pasaron 10 intentos → dejamos de buscar
-    if (attempts >= maxAttempts) {
-      this.logger.warn('No se encontró QR después de varios intentos');
-      clearInterval(interval);
-    }
-  }, 1000);
-}
+  private async findCanvas(page: puppeteer.Page) {
+    return await page.evaluateHandle(() => {
+      function deepSearch(node) {
+        if (node.tagName === 'CANVAS') return node;
 
-private async findCanvas(page: puppeteer.Page) {
-  return await page.evaluateHandle(() => {
-    function deepSearch(node) {
-      if (node.tagName === 'CANVAS') return node;
+        if (node.shadowRoot) {
+          for (const child of node.shadowRoot.children) {
+            const found = deepSearch(child);
+            if (found) return found;
+          }
+        }
 
-      if (node.shadowRoot) {
-        for (const child of node.shadowRoot.children) {
+        for (const child of node.children) {
           const found = deepSearch(child);
           if (found) return found;
         }
+
+        return null;
       }
 
-      for (const child of node.children) {
-        const found = deepSearch(child);
-        if (found) return found;
-      }
-
-      return null;
-    }
-
-    return deepSearch(document.body);
-  });
-}
-
+      return deepSearch(document.body);
+    });
+  }
 
   getQR() {
     return this.qrBase64;
