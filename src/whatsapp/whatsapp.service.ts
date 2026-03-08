@@ -10,12 +10,85 @@ export class WhatsappService {
   private qrBase64: string | null = null;
   private isReady = false;
 
+  // Cooldown para evitar reinicios en loop
+  private lastRestart = 0;
+  private readonly RESTART_COOLDOWN = 15000; // 15 segundos
+
+  private startWatcher() {
+    setInterval(async () => {
+      if (!this.page || !this.browser) return;
+
+      try {
+        const now = Date.now();
+
+        // 1. Si el browser está desconectado → reiniciar
+        if (!this.browser.isConnected()) {
+          this.logger.warn('Browser desconectado, reiniciando...');
+          return this.safeRestart();
+        }
+
+        // 2. Detectar si estamos logueados
+        const loggedIn = await this.page.$('[data-testid="chat-list-search"]');
+
+        if (loggedIn) {
+          if (!this.isReady) {
+            this.logger.log('Sesión restaurada');
+          }
+          this.isReady = true;
+          return;
+        }
+
+        // 3. Detectar si aparece el QR → sesión perdida
+        const qrVisible = await this.page.$('[data-testid="qrcode"]');
+
+        if (qrVisible) {
+          this.logger.warn('Sesión perdida, QR visible. Regenerando...');
+          this.isReady = false;
+          return this.safeRestart();
+        }
+
+        // 4. Detectar DOM roto (ni chat ni QR)
+        const bodyText = await this.page.evaluate(
+          () => document.body.innerText,
+        );
+
+        if (!loggedIn && !qrVisible && bodyText.length < 50) {
+          this.logger.error('DOM roto o vacío. Reiniciando...');
+          return this.safeRestart();
+        }
+      } catch (err) {
+        this.logger.error('Error en watcher, reiniciando...', err);
+        return this.safeRestart();
+      }
+    }, 5000); // cada 5 segundos
+  }
+
+  private async safeRestart() {
+  const now = Date.now();
+
+  if (now - this.lastRestart < this.RESTART_COOLDOWN) {
+    this.logger.warn('Reinicio bloqueado por cooldown');
+    return;
+  }
+
+  this.lastRestart = now;
+
+  try {
+    this.logger.log('Reiniciando sesión de WhatsApp...');
+    await this.browser?.close().catch(() => {});
+  } catch {}
+
+  await this.init();
+}
+
+
   async init() {
     // 1. Intentar headless
     const headlessSuccess = await this.tryInit(true);
 
     if (headlessSuccess) {
       this.logger.log('WhatsApp iniciado en headless');
+      this.startWatcher();
       return;
     }
 
@@ -26,6 +99,7 @@ export class WhatsappService {
 
     if (visibleSuccess) {
       this.logger.log('WhatsApp iniciado en modo visible');
+      this.startWatcher();
       return;
     }
 
