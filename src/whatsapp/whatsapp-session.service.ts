@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import * as puppeteer from 'puppeteer';
+import { exec } from 'child_process';
 
 export class WhatsappSession {
   private browser: puppeteer.Browser;
@@ -12,15 +13,27 @@ export class WhatsappSession {
 
   constructor(private readonly sessionId: string) {}
 
+  // ---------------------------
+  // Paths de sesión
+  // ---------------------------
+  private getBaseSessionFolder() {
+    return `./whatsapp-sessions/${this.sessionId}`;
+  }
+
+  private getSessionFolder(headless: boolean) {
+    return `${this.getBaseSessionFolder()}/${headless ? 'headless' : 'visible'}`;
+  }
+
+  // ---------------------------
+  // Ciclo de vida
+  // ---------------------------
   async init() {
     this.logger.log(`[${this.sessionId}] Inicializando sesión...`);
 
-    const headlessSuccess = await this.tryInit(true);
+    const headlessSuccess = await this.safeLaunch(true);
     if (!headlessSuccess) {
-      this.logger.warn(
-        `[${this.sessionId}] Headless falló, usando modo visible`,
-      );
-      await this.tryInit(false);
+      this.logger.warn(`[${this.sessionId}] Headless falló, usando modo visible`);
+      await this.safeLaunch(false);
     }
 
     this.startWatcher();
@@ -32,14 +45,85 @@ export class WhatsappSession {
     } catch {}
 
     const fs = await import('fs/promises');
-    await fs.rm(this.getSessionFolder(), { recursive: true, force: true });
+    await fs.rm(this.getBaseSessionFolder(), { recursive: true, force: true });
   }
 
-  private getSessionFolder() {
-    return `./whatsapp-sessions/${this.sessionId}`;
+  // ---------------------------
+  // SAFE LAUNCH
+  // ---------------------------
+  private async safeLaunch(headless: boolean): Promise<boolean> {
+    const folder = this.getSessionFolder(headless);
+
+    await this.removeChromeLock(folder);
+    await this.cleanCorruptedFiles(folder);
+    await this.killChromeProcesses(folder);
+
+    // pequeño delay para que el SO libere el userDataDir
+    await new Promise((r) => setTimeout(r, 300));
+
+    return this.tryInit(headless);
   }
 
+  // ---------------------------
+  // Limpieza de locks / archivos
+  // ---------------------------
+  private async removeChromeLock(folder: string) {
+    const fs = await import('fs/promises');
+    const lockPath = `${folder}/SingletonLock`;
+
+    try {
+      await fs.rm(lockPath, { force: true });
+      this.logger.warn(`[${this.sessionId}] SingletonLock eliminado (${folder})`);
+    } catch {}
+  }
+
+  private async cleanCorruptedFiles(folder: string) {
+    const fs = await import('fs/promises');
+
+    const corrupted = [
+      'SingletonLock',
+      'LOCK',
+      'Crashpad',
+      'BrowserMetrics',
+      'BrowserMetrics-spare.pma',
+      'GPUCache',
+    ];
+
+    for (const file of corrupted) {
+      try {
+        await fs.rm(`${folder}/${file}`, { recursive: true, force: true });
+        // log suave, solo si realmente lo querés ver
+        // this.logger.warn(`[${this.sessionId}] Archivo corrupto eliminado: ${file}`);
+      } catch {}
+    }
+  }
+
+  // ---------------------------
+  // Kill de procesos Chrome
+  // ---------------------------
+  private killChromeProcesses(userDataDir: string): Promise<void> {
+    return new Promise((resolve) => {
+      exec(`pgrep -f "${userDataDir}"`, (err, stdout) => {
+        if (err || !stdout) return resolve();
+
+        const pids = stdout.split('\n').filter(Boolean);
+
+        pids.forEach((pid) => {
+          exec(`kill -9 ${pid}`);
+          this.logger.warn(`[${this.sessionId}] Proceso Chrome matado: ${pid}`);
+        });
+
+        resolve();
+      });
+    });
+  }
+
+  // ---------------------------
+  // Lanzar Puppeteer + QR
+  // ---------------------------
   private async tryInit(headless: boolean): Promise<boolean> {
+    const userDataDir = this.getSessionFolder(headless);
+
     try {
       this.browser = await puppeteer.launch({
         headless,
@@ -54,7 +138,7 @@ export class WhatsappSession {
           '--window-size=1280,800',
         ],
         defaultViewport: { width: 1280, height: 800 },
-        userDataDir: this.getSessionFolder(),
+        userDataDir,
       });
 
       this.page = await this.browser.newPage();
@@ -67,7 +151,6 @@ export class WhatsappSession {
         waitUntil: 'networkidle2',
       });
 
-      // Esperar a que el QR aparezca
       const qr = await this.waitForQR();
       if (!qr) {
         this.logger.error(`[${this.sessionId}] No se pudo capturar el QR`);
@@ -77,15 +160,28 @@ export class WhatsappSession {
 
       this.qrBase64 = qr;
       this.isReady = true;
-      this.logger.log(`[${this.sessionId}] Sesión inicializada correctamente`);
+      this.logger.log(
+        `[${this.sessionId}] Sesión inicializada correctamente (headless=${headless})`,
+      );
       return true;
     } catch (err) {
       this.logger.error(`[${this.sessionId}] Error en tryInit`, err);
+
+      const msg = (err as Error)?.message || '';
+      if (msg.includes('The browser is already running')) {
+        this.logger.warn(
+          `[${this.sessionId}] Chrome ya estaba corriendo para ${userDataDir} → matando procesos...`,
+        );
+        await this.killChromeProcesses(userDataDir);
+      }
+
       return false;
     }
   }
 
-  // Espera activa hasta que el QR esté disponible
+  // ---------------------------
+  // QR
+  // ---------------------------
   private async waitForQR(): Promise<string | null> {
     for (let i = 0; i < 20; i++) {
       const qr = await this.captureQR();
@@ -98,7 +194,7 @@ export class WhatsappSession {
   private async captureQR(): Promise<string | null> {
     this.logger.log(`[${this.sessionId}] Buscando QR...`);
 
-    // 1. Canvas correcto del QR
+    // Canvas principal
     try {
       const qrCanvas = await this.page.$(
         'canvas[aria-label="Scan this QR code to link a device!"]',
@@ -114,14 +210,9 @@ export class WhatsappSession {
           return `data:image/png;base64,${Buffer.from(buffer).toString('base64')}`;
         }
       }
-    } catch (err) {
-      this.logger.warn(
-        `[${this.sessionId}] Error capturando canvas correcto`,
-        err,
-      );
-    }
+    } catch {}
 
-    // 2. Fallback: contenedor del QR
+    // Fallback contenedor
     try {
       const qrContainer = await this.page.$('div[data-ref]');
       if (qrContainer) {
@@ -137,6 +228,9 @@ export class WhatsappSession {
     return null;
   }
 
+  // ---------------------------
+  // Watcher
+  // ---------------------------
   private startWatcher() {
     setInterval(async () => {
       if (!this.page || !this.browser) return;
@@ -179,6 +273,9 @@ export class WhatsappSession {
     await this.init();
   }
 
+  // ---------------------------
+  // API pública
+  // ---------------------------
   getQR() {
     return this.qrBase64;
   }
@@ -188,7 +285,9 @@ export class WhatsappSession {
       throw new Error('Sesión no lista');
     }
 
-    const url = `https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(message)}`;
+    const url = `https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(
+      message,
+    )}`;
 
     await this.page.goto(url, { waitUntil: 'networkidle2' });
 
