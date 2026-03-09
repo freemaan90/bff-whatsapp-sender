@@ -21,6 +21,15 @@ export class WhatsappSession {
 
     this.startWatcher();
   }
+  
+  async close() {
+    try {
+      await this.browser?.close();
+    } catch {}
+
+    const fs = await import('fs/promises');
+    await fs.rm(this.getSessionFolder(), { recursive: true, force: true });
+  }
 
   private getSessionFolder() {
     return `./whatsapp-sessions/${this.sessionId}`;
@@ -93,7 +102,9 @@ export class WhatsappSession {
         return `data:image/png;base64,${Buffer.from(buffer).toString('base64')}`;
       }
     } catch {
-        this.logger.warn(`[${this.sessionId}] Canvas no encontrado, usando screenshot fallback`);
+      this.logger.warn(
+        `[${this.sessionId}] Canvas no encontrado, usando screenshot fallback`,
+      );
     }
 
     return null;

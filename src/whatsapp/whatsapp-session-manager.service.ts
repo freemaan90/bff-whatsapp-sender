@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
-import { WhatsappSession } from './whatsapp-session.service';
+import { Injectable, Logger } from "@nestjs/common";
+import { WhatsappSession } from "./whatsapp-session.service";
 
 @Injectable()
 export class WhatsappSessionManager {
   private sessions = new Map<string, WhatsappSession>();
+  private readonly logger = new Logger(WhatsappSessionManager.name);
 
   getSession(sessionId: string): WhatsappSession {
     let session = this.sessions.get(sessionId);
@@ -14,10 +15,20 @@ export class WhatsappSessionManager {
       this.sessions.set(sessionId, session);
     }
 
-    return session; 
+    return session;
   }
 
   listSessions() {
     return [...this.sessions.keys()];
+  }
+
+  async deleteSession(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+
+    await session.close();
+    this.sessions.delete(sessionId);
+
+    return true;
   }
 }

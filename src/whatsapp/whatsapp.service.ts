@@ -1,5 +1,5 @@
-import { Injectable } from "@nestjs/common";
-import { WhatsappSessionManager } from "./whatsapp-session-manager.service";
+import { Injectable } from '@nestjs/common';
+import { WhatsappSessionManager } from './whatsapp-session-manager.service';
 
 @Injectable()
 export class WhatsappService {
@@ -11,5 +11,17 @@ export class WhatsappService {
 
   sendMessage(sessionId: string, phone: string, message: string) {
     return this.manager.getSession(sessionId).sendMessage(phone, message);
+  }
+
+  listSessions() {
+    return this.manager.listSessions();
+  }
+
+  createSession(id: string) {
+    return this.manager.getSession(id);
+  }
+
+  deleteSession(id: string) {
+    return this.manager.deleteSession(id);
   }
 }

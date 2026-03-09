@@ -10,10 +10,28 @@ export class WhatsappController {
   constructor(private readonly whatsapp: WhatsappService) {}
 
   @MessagePattern({ cmd: 'whatsapp_sender_qr' })
-  async getQR(@Payload() data: { sessionId: string }) {
+  async getQR(@Payload() data: any) {
+    const sessionId = data.sessionId ?? data; // soporta ambos formatos
+    this.logger.log(`Session ID recibido: ${sessionId}`);
+    return this.whatsapp.getQR(String(sessionId));
+  }
+
+  @MessagePattern({ cmd: 'whatsapp_sender_sessions' })
+  list() {
+    return this.whatsapp.listSessions();
+  }
+
+  @MessagePattern({ cmd: 'whatsapp_sender_delete_session' })
+  delete(@Payload() data: { sessionId: string }) {
     const { sessionId } = data;
-    this.logger.log('Session ID recibido:', sessionId);
-    return this.whatsapp.getQR(sessionId);
+    return this.whatsapp.deleteSession(sessionId);
+  }
+
+  @MessagePattern({ cmd: 'whatsapp_sender_create_session' })
+  create(@Payload() data: any) {
+    const sessionId = data.sessionId ?? data; // soporta ambos formatos
+    this.logger.log(`Session ID recibido: ${sessionId}`);
+    return this.whatsapp.createSession(sessionId);
   }
 
   @Post('send/:sessionId')
