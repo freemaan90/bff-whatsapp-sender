@@ -8,7 +8,6 @@ export class WhatsappSession {
   private qrBase64: string | null = null;
   private isReady = false;
   private lastRestart = 0;
-  private readonly RESTART_COOLDOWN = 15000;
   private readonly logger = new Logger(WhatsappSession.name);
 
   constructor(private readonly sessionId: string) {}
