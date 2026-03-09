@@ -34,6 +34,12 @@ export class WhatsappController {
     return this.whatsapp.createSession(sessionId);
   }
 
+  @MessagePattern({ cmd: 'whatsapp_sender_session_status' })
+  getStatus(@Payload() data: {sessionId:string}) {
+    const { sessionId } = data;
+    return this.whatsapp.getStatus(sessionId);
+  }
+
   @Post('send/:sessionId')
   send(@Param('sessionId') id: string, @Body() { phone, message }) {
     return this.whatsapp.sendMessage(id, phone, message);

@@ -24,4 +24,8 @@ export class WhatsappService {
   deleteSession(id: string) {
     return this.manager.deleteSession(id);
   }
+
+  getStatus(id: string) {
+    return this.manager.getStatus(id);
+  }
 }

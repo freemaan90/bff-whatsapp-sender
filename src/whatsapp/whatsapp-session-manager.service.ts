@@ -37,4 +37,9 @@ export class WhatsappSessionManager {
 
     return true;
   }
+
+  getStatus(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    return session ? session.getStatus() : null;
+  }
 }

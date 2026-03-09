@@ -21,7 +21,7 @@ export class WhatsappSession {
 
     this.startWatcher();
   }
-  
+
   async close() {
     try {
       await this.browser?.close();
@@ -193,5 +193,16 @@ export class WhatsappSession {
     await this.page.click(sendButton);
 
     return { success: true };
+  }
+
+  getStatus() {
+    return {
+      sessionId: this.sessionId,
+      isReady: this.isReady,
+      qrBase64: this.qrBase64,
+      hasBrowser: !!this.browser,
+      hasPage: !!this.page,
+      lastRestart: this.lastRestart,
+    };
   }
 }
