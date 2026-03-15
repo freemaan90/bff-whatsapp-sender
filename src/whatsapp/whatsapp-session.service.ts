@@ -137,6 +137,7 @@ export class WhatsappSession {
         waitUntil: 'networkidle2',
       });
 
+      // Esperar el QR
       const qr = await this.waitForQR();
       if (!qr) {
         this.logger.error(`[${this.sessionId}] No se pudo capturar el QR`);
@@ -145,8 +146,11 @@ export class WhatsappSession {
       }
 
       this.qrBase64 = qr;
-      this.isReady = true;
-      this.logger.log(`[${this.sessionId}] Sesión inicializada correctamente (headless)`);
+      this.logger.log(`[${this.sessionId}] QR generado, esperando escaneo...`);
+
+      // Esperar a que se autentique (en background)
+      this.waitForAuthentication();
+
       return true;
 
     } catch (err) {
@@ -159,6 +163,27 @@ export class WhatsappSession {
       }
 
       return false;
+    }
+  }
+
+  // ---------------------------
+  // Esperar autenticación
+  // ---------------------------
+  private async waitForAuthentication() {
+    try {
+      this.logger.log(`[${this.sessionId}] Esperando autenticación...`);
+      
+      // Esperar a que aparezca el elemento que indica que está autenticado
+      await this.page.waitForSelector('div[data-testid="conversation-panel-wrapper"]', {
+        timeout: 120000, // 2 minutos
+      });
+
+      this.isReady = true;
+      this.qrBase64 = null; // Limpiar el QR una vez autenticado
+      this.logger.log(`[${this.sessionId}] ✅ Sesión autenticada correctamente`);
+    } catch (err) {
+      this.logger.error(`[${this.sessionId}] Timeout esperando autenticación`, err);
+      this.isReady = false;
     }
   }
 
