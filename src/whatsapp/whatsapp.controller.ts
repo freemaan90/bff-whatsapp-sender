@@ -40,6 +40,12 @@ export class WhatsappController {
     return this.whatsapp.getStatus(sessionId);
   }
 
+  @MessagePattern({ cmd: 'whatsapp_sender_send_message' })
+  async sendMessage(@Payload() data: { sessionId: string; phone: string; message: string }) {
+    const { sessionId, phone, message } = data;
+    return this.whatsapp.sendMessage(sessionId, phone, message);
+  }
+
   @Post('send/:sessionId')
   send(@Param('sessionId') id: string, @Body() { phone, message }) {
     return this.whatsapp.sendMessage(id, phone, message);

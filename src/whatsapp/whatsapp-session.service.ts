@@ -135,23 +135,50 @@ export class WhatsappSession {
 
       await this.page.goto('https://web.whatsapp.com', {
         waitUntil: 'networkidle2',
+        timeout: 60000,
       });
 
-      // Esperar el QR
-      const qr = await this.waitForQR();
-      if (!qr) {
-        this.logger.error(`[${this.sessionId}] No se pudo capturar el QR`);
-        await this.browser.close();
-        return false;
+      this.logger.log(`[${this.sessionId}] Página cargada, detectando estado...`);
+
+      // Esperar hasta 15s a que aparezca o el panel de chats (ya autenticado) o el QR
+      const state = await this.detectPageState(15000);
+      this.logger.log(`[${this.sessionId}] Estado detectado: ${state}`);
+
+      if (state === 'authenticated') {
+        this.isReady = true;
+        this.qrBase64 = null;
+        this.logger.log(`[${this.sessionId}] ✅ Sesión ya autenticada (sin QR necesario)`);
+        return true;
       }
 
-      this.qrBase64 = qr;
-      this.logger.log(`[${this.sessionId}] QR generado, esperando escaneo...`);
+      if (state === 'qr') {
+        // Esperar el QR
+        const qr = await this.waitForQR();
+        if (!qr) {
+          this.logger.error(`[${this.sessionId}] No se pudo capturar el QR`);
+          await this.browser.close();
+          return false;
+        }
 
-      // Esperar a que se autentique (en background)
-      this.waitForAuthentication();
+        this.qrBase64 = qr;
+        this.logger.log(`[${this.sessionId}] QR generado, esperando escaneo...`);
 
-      return true;
+        // Esperar a que se autentique (en background)
+        this.waitForAuthentication();
+        return true;
+      }
+
+      // Estado desconocido — tomar screenshot para debug y asumir que necesita QR
+      this.logger.warn(`[${this.sessionId}] Estado desconocido, intentando capturar QR de todas formas...`);
+      const qr = await this.waitForQR();
+      if (qr) {
+        this.qrBase64 = qr;
+        this.waitForAuthentication();
+        return true;
+      }
+
+      await this.browser.close();
+      return false;
 
     } catch (err) {
       this.logger.error(`[${this.sessionId}] Error en tryInit`, err);
@@ -167,24 +194,101 @@ export class WhatsappSession {
   }
 
   // ---------------------------
+  // Detectar estado de la página (autenticado vs QR vs desconocido)
+  // ---------------------------
+  private async detectPageState(timeoutMs: number): Promise<'authenticated' | 'qr' | 'unknown'> {
+    // Selectores que indican sesión activa
+    const authSelectors = [
+      'div[data-testid="conversation-panel-wrapper"]',
+      '#side',                          // panel lateral de chats
+      'div[data-testid="chat-list"]',
+      'header[data-testid="chatlist-header"]',
+    ];
+
+    // Selectores que indican pantalla de QR
+    const qrSelectors = [
+      'canvas[aria-label="Scan this QR code to link a device!"]',
+      'div[data-ref]',
+      'div[data-testid="qrcode"]',
+    ];
+
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        for (const sel of authSelectors) {
+          const el = await this.page.$(sel);
+          if (el) {
+            this.logger.log(`[${this.sessionId}] Selector autenticado encontrado: ${sel}`);
+            return 'authenticated';
+          }
+        }
+
+        for (const sel of qrSelectors) {
+          const el = await this.page.$(sel);
+          if (el) {
+            this.logger.log(`[${this.sessionId}] Selector QR encontrado: ${sel}`);
+            return 'qr';
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`[${this.sessionId}] Error en detectPageState: ${(err as Error).message}`);
+      }
+
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    // Loguear el HTML de la página para debug
+    try {
+      const title = await this.page.title();
+      const url = this.page.url();
+      // Capturar los primeros elementos del body para entender qué hay en la página
+      const bodyContent = await this.page.evaluate(() => {
+        const els = document.body.querySelectorAll('[data-testid]');
+        return Array.from(els).slice(0, 10).map(el => el.getAttribute('data-testid')).join(', ');
+      }).catch(() => 'no se pudo obtener');
+      this.logger.warn(`[${this.sessionId}] Timeout detectando estado. Título="${title}" url="${url}" data-testids=[${bodyContent}]`);
+    } catch {}
+
+    return 'unknown';
+  }
+
+  // ---------------------------
   // Esperar autenticación
   // ---------------------------
   private async waitForAuthentication() {
-    try {
-      this.logger.log(`[${this.sessionId}] Esperando autenticación...`);
-      
-      // Esperar a que aparezca el elemento que indica que está autenticado
-      await this.page.waitForSelector('div[data-testid="conversation-panel-wrapper"]', {
-        timeout: 120000, // 2 minutos
-      });
+    const authSelectors = [
+      '#side',
+      'div[data-testid="conversation-panel-wrapper"]',
+      'div[data-testid="chat-list"]',
+      'header[data-testid="chatlist-header"]',
+      'div[aria-label="Chat list"]',
+      'div[data-testid="default-user"]',
+    ];
 
-      this.isReady = true;
-      this.qrBase64 = null; // Limpiar el QR una vez autenticado
-      this.logger.log(`[${this.sessionId}] ✅ Sesión autenticada correctamente`);
-    } catch (err) {
-      this.logger.error(`[${this.sessionId}] Timeout esperando autenticación`, err);
-      this.isReady = false;
+    const deadline = Date.now() + 120000; // 2 minutos
+
+    while (Date.now() < deadline) {
+      // Si ya está listo (ej: detectPageState lo marcó), salir
+      if (this.isReady) return;
+
+      for (const sel of authSelectors) {
+        try {
+          const el = await this.page.$(sel);
+          if (el) {
+            this.isReady = true;
+            this.qrBase64 = null;
+            this.logger.log(`[${this.sessionId}] ✅ Sesión autenticada correctamente (selector: ${sel})`);
+            return;
+          }
+        } catch {}
+      }
+
+      await new Promise((r) => setTimeout(r, 500));
     }
+
+    this.isReady = false;
+    this.logger.error(`[${this.sessionId}] ❌ Timeout esperando autenticación`);
   }
 
   // ---------------------------
@@ -211,8 +315,8 @@ export class WhatsappSession {
         const box = await qrCanvas.boundingBox();
         if (box && box.width > 150 && box.height > 150) {
           const buffer = await qrCanvas.screenshot();
-          const qrImage = `data:image/png;base64,${Buffer.from(buffer).toString('base64')}`
-          this.logger.log(`[${this.sessionId}] QR capturado desde canvas correcto: ${qrImage}`);
+          const qrImage = `data:image/png;base64,${Buffer.from(buffer).toString('base64')}`;
+          this.logger.log(`[${this.sessionId}] QR capturado`);
           return qrImage;
         }
       }
@@ -239,22 +343,171 @@ export class WhatsappSession {
   }
 
   async sendMessage(phone: string, message: string) {
-    if (!this.isReady) {
-      throw new Error('Sesión no lista');
+      if (!this.isReady) {
+        throw new Error('Sesión no lista');
+      }
+
+      const phoneFormatted = phone.startsWith('+') ? phone : `+${phone}`;
+      this.logger.log(`[${this.sessionId}] Enviando mensaje a ${phoneFormatted}`);
+
+      // Abrir nueva conversación via botón "New chat" en la UI de WhatsApp Web
+      const newChatSelectors = [
+        'div[data-testid="new-chat-btn"]',
+        'span[data-testid="new-chat-btn"]',
+        'div[aria-label="New chat"]',
+        'span[data-icon="new-chat-outline"]',
+      ];
+
+      let newChatBtn: any = null;
+      for (const sel of newChatSelectors) {
+        try {
+          newChatBtn = await this.page.$(sel);
+          if (newChatBtn) {
+            this.logger.log(`[${this.sessionId}] Botón nuevo chat: ${sel}`);
+            break;
+          }
+        } catch {}
+      }
+
+      if (!newChatBtn) {
+        // Dump de testids para debug
+        try {
+          const testids = await this.page.evaluate(() =>
+            Array.from(document.querySelectorAll('[data-testid]'))
+              .slice(0, 20).map((el) => el.getAttribute('data-testid')).join(', '),
+          );
+          this.logger.error(`[${this.sessionId}] No se encontró botón nuevo chat. testids=[${testids}]`);
+        } catch {}
+        throw new Error('No se encontró el botón de nuevo chat');
+      }
+
+      await newChatBtn.click();
+      await new Promise((r) => setTimeout(r, 1000));
+
+      // Buscar el input de búsqueda de contacto
+      const searchSelectors = [
+        'div[data-testid="chat-list-search"]',
+        'div[contenteditable="true"][data-tab="3"]',
+        'input[type="text"]',
+      ];
+
+      let searchEl: any = null;
+      for (const sel of searchSelectors) {
+        try {
+          await this.page.waitForSelector(sel, { timeout: 5000 });
+          searchEl = await this.page.$(sel);
+          if (searchEl) {
+            this.logger.log(`[${this.sessionId}] Input búsqueda: ${sel}`);
+            break;
+          }
+        } catch {}
+      }
+
+      if (!searchEl) {
+        throw new Error('No se encontró el input de búsqueda');
+      }
+
+      // Escribir el número de teléfono
+      await searchEl.click();
+      await new Promise((r) => setTimeout(r, 300));
+      await this.page.keyboard.type(phoneFormatted, { delay: 50 });
+      await new Promise((r) => setTimeout(r, 2000));
+
+      this.logger.log(`[${this.sessionId}] Buscando contacto ${phoneFormatted}...`);
+
+      // Seleccionar el primer resultado
+      const resultSelectors = [
+        'div[data-testid="cell-frame-container"]',
+        'div[data-testid="chat-list-item"]',
+        'div[role="listitem"]',
+      ];
+
+      let resultEl: any = null;
+      for (const sel of resultSelectors) {
+        try {
+          await this.page.waitForSelector(sel, { timeout: 5000 });
+          resultEl = await this.page.$(sel);
+          if (resultEl) {
+            this.logger.log(`[${this.sessionId}] Resultado encontrado: ${sel}`);
+            break;
+          }
+        } catch {}
+      }
+
+      if (!resultEl) {
+        throw new Error(`No se encontró el contacto ${phoneFormatted}`);
+      }
+
+      await resultEl.click();
+      await new Promise((r) => setTimeout(r, 1000));
+
+      // Esperar el compose box
+      const inputSelectors = [
+        'div[data-testid="conversation-compose-box-input"]',
+        'div[contenteditable="true"][data-tab="10"]',
+        'footer div[contenteditable="true"]',
+        'div[contenteditable="true"]',
+      ];
+
+      let inputEl: any = null;
+      for (const sel of inputSelectors) {
+        try {
+          await this.page.waitForSelector(sel, { timeout: 10000 });
+          inputEl = await this.page.$(sel);
+          if (inputEl) {
+            this.logger.log(`[${this.sessionId}] Compose box: ${sel}`);
+            break;
+          }
+        } catch {}
+      }
+
+      if (!inputEl) {
+        try {
+          const testids = await this.page.evaluate(() =>
+            Array.from(document.querySelectorAll('[data-testid]'))
+              .slice(0, 20).map((el) => el.getAttribute('data-testid')).join(', '),
+          );
+          this.logger.error(`[${this.sessionId}] url="${this.page.url()}" testids=[${testids}]`);
+        } catch {}
+        throw new Error(`No se pudo abrir el chat para ${phone}`);
+      }
+
+      // Escribir y enviar
+      await inputEl.click();
+      await new Promise((r) => setTimeout(r, 300));
+      await this.page.keyboard.type(message, { delay: 30 });
+      await new Promise((r) => setTimeout(r, 500));
+
+      const sendSelectors = [
+        'button[data-testid="compose-btn-send"]',
+        'button[aria-label="Send"]',
+        'button[aria-label="Enviar"]',
+        'span[data-icon="send"]',
+      ];
+
+      let sent = false;
+      for (const sel of sendSelectors) {
+        try {
+          const btn = await this.page.$(sel);
+          if (btn) {
+            await btn.click();
+            sent = true;
+            this.logger.log(`[${this.sessionId}] Enviado con: ${sel}`);
+            break;
+          }
+        } catch {}
+      }
+
+      if (!sent) {
+        await this.page.keyboard.press('Enter');
+        this.logger.log(`[${this.sessionId}] Enviado con Enter`);
+      }
+
+      this.logger.log(`[${this.sessionId}] ✅ Mensaje enviado a ${phone}`);
+      await new Promise((r) => setTimeout(r, 1000));
+
+      return { success: true };
     }
-
-    const url = `https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(
-      message,
-    )}`;
-
-    await this.page.goto(url, { waitUntil: 'networkidle2' });
-
-    const sendButton = 'span[data-icon="send"]';
-    await this.page.waitForSelector(sendButton, { timeout: 15000 });
-    await this.page.click(sendButton);
-
-    return { success: true };
-  }
 
   getStatus() {
     return {
