@@ -350,96 +350,13 @@ export class WhatsappSession {
       const phoneFormatted = phone.startsWith('+') ? phone : `+${phone}`;
       this.logger.log(`[${this.sessionId}] Enviando mensaje a ${phoneFormatted}`);
 
-      // Abrir nueva conversación via botón "New chat" en la UI de WhatsApp Web
-      const newChatSelectors = [
-        'div[data-testid="new-chat-btn"]',
-        'span[data-testid="new-chat-btn"]',
-        'div[aria-label="New chat"]',
-        'span[data-icon="new-chat-outline"]',
-      ];
-
-      let newChatBtn: any = null;
-      for (const sel of newChatSelectors) {
-        try {
-          newChatBtn = await this.page.$(sel);
-          if (newChatBtn) {
-            this.logger.log(`[${this.sessionId}] Botón nuevo chat: ${sel}`);
-            break;
-          }
-        } catch {}
-      }
-
-      if (!newChatBtn) {
-        // Dump de testids para debug
-        try {
-          const testids = await this.page.evaluate(() =>
-            Array.from(document.querySelectorAll('[data-testid]'))
-              .slice(0, 20).map((el) => el.getAttribute('data-testid')).join(', '),
-          );
-          this.logger.error(`[${this.sessionId}] No se encontró botón nuevo chat. testids=[${testids}]`);
-        } catch {}
-        throw new Error('No se encontró el botón de nuevo chat');
-      }
-
-      await newChatBtn.click();
-      await new Promise((r) => setTimeout(r, 1000));
-
-      // Buscar el input de búsqueda de contacto
-      const searchSelectors = [
-        'div[data-testid="chat-list-search"]',
-        'div[contenteditable="true"][data-tab="3"]',
-        'input[type="text"]',
-      ];
-
-      let searchEl: any = null;
-      for (const sel of searchSelectors) {
-        try {
-          await this.page.waitForSelector(sel, { timeout: 5000 });
-          searchEl = await this.page.$(sel);
-          if (searchEl) {
-            this.logger.log(`[${this.sessionId}] Input búsqueda: ${sel}`);
-            break;
-          }
-        } catch {}
-      }
-
-      if (!searchEl) {
-        throw new Error('No se encontró el input de búsqueda');
-      }
-
-      // Escribir el número de teléfono
-      await searchEl.click();
-      await new Promise((r) => setTimeout(r, 300));
-      await this.page.keyboard.type(phoneFormatted, { delay: 50 });
-      await new Promise((r) => setTimeout(r, 2000));
-
-      this.logger.log(`[${this.sessionId}] Buscando contacto ${phoneFormatted}...`);
-
-      // Seleccionar el primer resultado
-      const resultSelectors = [
-        'div[data-testid="cell-frame-container"]',
-        'div[data-testid="chat-list-item"]',
-        'div[role="listitem"]',
-      ];
-
-      let resultEl: any = null;
-      for (const sel of resultSelectors) {
-        try {
-          await this.page.waitForSelector(sel, { timeout: 5000 });
-          resultEl = await this.page.$(sel);
-          if (resultEl) {
-            this.logger.log(`[${this.sessionId}] Resultado encontrado: ${sel}`);
-            break;
-          }
-        } catch {}
-      }
-
-      if (!resultEl) {
-        throw new Error(`No se encontró el contacto ${phoneFormatted}`);
-      }
-
-      await resultEl.click();
-      await new Promise((r) => setTimeout(r, 1000));
+      const phoneClean = phone.replace(/\D/g, ''); // solo dígitos
+      this.logger.log(`[${this.sessionId}] Navegando directamente a chat con ${phoneClean}`);
+      await this.page.goto(
+        `https://web.whatsapp.com/send?phone=${phoneClean}`,
+        { waitUntil: 'networkidle2', timeout: 30000 },
+      );
+      await new Promise((r) => setTimeout(r, 1500));
 
       // Esperar el compose box
       const inputSelectors = [
